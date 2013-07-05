@@ -1,27 +1,17 @@
-import math
 from itertools import product
-import sys
 
-_INT_BITS = int(math.log(sys.maxint, 2) + 1)
-_HALF_BITS = _INT_BITS // 2
 
+_INT_BITS = 64
+_PAIR_LENGTH_BITS = 6
+_PAIR_BITS = _INT_BITS - _PAIR_LENGTH_BITS
+_HALF_BITS = _PAIR_BITS // 2
+
+_PAIR_MASK = (1 << _PAIR_BITS) - 1
 _LOW_ORDER_MASK = (1 << _HALF_BITS) - 1
 
-def explicit_interleave(x, y):
-    for var in (x, y):
-        assert isinstance(var, int)
-        assert var >> _HALF_BITS == 0
-
-    z = 0
-    for offset in xrange(_HALF_BITS):
-        bit_pair = (
-            (((x >> offset) & 1) << 1)
-            |
-            ((y >> offset) & 1)
-        )
-        z |= bit_pair << (offset * 2)
-
-    return z
+_ZLOC_MULTIPLIER = 1. / (360. / (1 << _HALF_BITS))
+_LATITUDE_OFFSET = 90  # -90 to 90 degrees -> 0 to 180 degrees
+_LONGITUDE_OFFSET = 180  # -180 to 180 degrees -> 0 to 360 degrees
 
 
 def _build_twiddling_steps():
@@ -71,7 +61,7 @@ def _build_twiddling_steps():
     """
 
     steps = []
-    stride = _HALF_BITS // 2
+    stride = _INT_BITS // 4
     while stride > 0:
         mask = (1 << stride) - 1
         span = stride * 2
@@ -83,7 +73,6 @@ def _build_twiddling_steps():
     return tuple(steps)
 
 
-
 _BIT_TWIDDLING_STEPS = _build_twiddling_steps()
 
 
@@ -93,16 +82,6 @@ def interleave(x, y):
         y = (y | (y << stride)) & mask
     z = (x << 1) | y
     return z
-
-
-def explicit_deinterleave(z):
-    x = 0
-    y = 0
-    for offset in xrange(_HALF_BITS):
-        bit_pair = (z >> (offset * 2)) & 3
-        x |= (bit_pair >> 1) << offset
-        y |= (bit_pair & 1) << offset
-    return (x, y)
 
 
 def deinterleave(z):
@@ -120,6 +99,7 @@ def deinterleave(z):
 
     return x, y
 
+
 def test_symmetric_interleave(num_tests=10000):
     import random
     max_half_int = (1 << _HALF_BITS) - 1
@@ -132,32 +112,57 @@ def test_symmetric_interleave(num_tests=10000):
         ), 'Fail for x: {0}, y: {1}'.format(x, y)
 
 
-def neighbors(z, length):
+def _show_bits(n):
+    print bin((1 << 64) | n)[3:]
 
-    mask = (1 << length) - 1
+
+def neighbors(z):
+    pairs = (z >> _PAIR_BITS)
+    pair_bits = pairs * 2
+    pair_bit_offset = _PAIR_BITS - pair_bits
+
+    z = (z & _PAIR_MASK) >> pair_bit_offset
+
+    header = pairs << _PAIR_BITS
+
+    bit_mask = (1 << pair_bits) - 1
 
     def adjacent(n):
-        return tuple((n + mod) & mask for mod in (-1, 0, 1))
+        return tuple((n + mod) & bit_mask for mod in (-1, 0, 1))
 
     xs, ys = map(adjacent, deinterleave(z))
-    return tuple(interleave(x, y) for x, y in product(xs, ys))
+    return tuple(
+        (interleave(x, y) << pair_bit_offset) | header
+        for x, y in product(xs, ys)
+    )
 
 
-_ZLOC_MULTIPLIER = 1. / (360. / (1 << _HALF_BITS))
-_LATITUDE_OFFSET = 90  # -90 to 90 degrees -> 0 to 180 degrees
-_LONGITUDE_OFFSET = 180  # -180 to 180 degrees -> 0 to 360 degrees
+def ancestor(z, level=1):
+    new_pairs = (z >> _PAIR_BITS) - level
+    new_pair_bits = 2 * new_pairs
+    mask = ((1 << new_pair_bits) - 1) << (_PAIR_BITS - new_pair_bits)
+    z &= mask
+    z |= new_pairs << _PAIR_BITS
+    return z
+
 
 def lat_lng_to_zloc(lat, lng):
     lat = int((_LATITUDE_OFFSET + lat) * _ZLOC_MULTIPLIER)
     lng = int((_LONGITUDE_OFFSET + lng) * _ZLOC_MULTIPLIER)
     zloc = interleave(lat, lng)
+    zloc |= _HALF_BITS << _PAIR_BITS
     return zloc
+
 
 def zloc_to_lat_lng(zloc):
     lat, lng = deinterleave(zloc)
     lat = float(lat) / _ZLOC_MULTIPLIER - _LATITUDE_OFFSET
     lng = float(lng) / _ZLOC_MULTIPLIER - _LONGITUDE_OFFSET
     return lat, lng
+
+
+def zloc_to_lat_lng_range(zloc):
+    pass
 
 
 # TODO: encode bit length in the first 6 bits of the int, leaving 58 for pairs
