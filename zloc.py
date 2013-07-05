@@ -144,7 +144,6 @@ def neighbors(z, length):
 
 
 _ZLOC_MULTIPLIER = 1. / (360. / (1 << _HALF_BITS))
-_ZLOC_MULTIPLIER = 1. / (360. / (1 << (_HALF_BITS - 6)))
 _LATITUDE_OFFSET = 90  # -90 to 90 degrees -> 0 to 180 degrees
 _LONGITUDE_OFFSET = 180  # -180 to 180 degrees -> 0 to 360 degrees
 
