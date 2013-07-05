@@ -110,10 +110,10 @@ def deinterleave(z):
     y = z
 
     for stride, mask in reversed(_BIT_TWIDDLING_STEPS):
-        x = x & mask
-        x = x | (x >> stride)
-        y = y & mask
-        y = y | (y >> stride)
+        x &= mask
+        x |= x >> stride
+        y &= mask
+        y |= y >> stride
 
     x &= _LOW_ORDER_MASK
     y &= _LOW_ORDER_MASK
