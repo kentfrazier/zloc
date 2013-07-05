@@ -71,15 +71,15 @@ def _build_twiddling_steps():
     """
 
     steps = []
-    chunk_size = _HALF_BITS
-    while chunk_size > 1:
-        mask = 0
-        width = chunk_size // 2
-        submask = (1 << width) - 1
-        for offset in xrange(0, _INT_BITS, chunk_size):
-            mask |= submask << offset
-        steps.append((width, mask))
-        chunk_size >>= 1
+    stride = _HALF_BITS // 2
+    while stride > 0:
+        mask = (1 << stride) - 1
+        span = stride * 2
+        while span < _INT_BITS:
+            mask |= mask << span
+            span *= 2
+        steps.append((stride, mask))
+        stride //= 2
     return tuple(steps)
 
 
