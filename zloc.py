@@ -1,17 +1,38 @@
 from itertools import product
+from math import (
+    atan2,
+    ceil,
+    cos,
+    log,
+    pi,
+    radians,
+    sin,
+    sqrt,
+)
 
 
 _INT_BITS = 64
 _PAIR_LENGTH_BITS = 6
 _PAIR_BITS = _INT_BITS - _PAIR_LENGTH_BITS
-_HALF_BITS = _PAIR_BITS // 2
+MAX_PRECISION = _PAIR_BITS // 2
+_NUM_ZLOC_VALUES = 1 << MAX_PRECISION
 
 _PAIR_MASK = (1 << _PAIR_BITS) - 1
-_LOW_ORDER_MASK = (1 << _HALF_BITS) - 1
+_LOW_ORDER_MASK = (1 << MAX_PRECISION) - 1
 
-_ZLOC_MULTIPLIER = 1. / (360. / (1 << _HALF_BITS))
-_LATITUDE_OFFSET = 90  # -90 to 90 degrees -> 0 to 180 degrees
-_LONGITUDE_OFFSET = 180  # -180 to 180 degrees -> 0 to 360 degrees
+_RADIANS_PER_ZLOC_VALUE = 2 * pi / _NUM_ZLOC_VALUES
+_DEGREES_PER_ZLOC_VALUE = 360. / _NUM_ZLOC_VALUES
+_LATITUDE_DEGREE_OFFSET = 90.     # -90 to 90 degrees     -> 0 to 180 degrees
+_LONGITUDE_DEGREE_OFFSET = 180.   # -180 to 180 degrees   -> 0 to 360 degrees
+_LATITUDE_RADIAN_OFFSET = pi / 2  # -pi/2 to pi/2 radians -> 0 to pi radians
+_LONGITUDE_RADIAN_OFFSET = pi     # -pi to pi radians     -> 0 to 2*pi radians
+
+# According to WGS-84 reference ellipsoid
+EARTH_RADIUS_EQUATORIAL = 6378137.0
+EARTH_RADIUS_POLAR = 6356752.314245
+
+# Per the formula from the International Union of Geodesy and Geophysics
+EARTH_RADIUS_MEAN = (2 * EARTH_RADIUS_EQUATORIAL + EARTH_RADIUS_POLAR) / 3
 
 
 def _build_twiddling_steps():
@@ -100,74 +121,259 @@ def deinterleave(z):
     return x, y
 
 
+def _show_bits(n):
+    print bin((1 << 64) | n)[3:]
+
+
+_NEIGHBOR_OFFSETS = tuple(product((-1, 0, 1), (-1, 0, 1)))
+
+def neighbors(zloc):
+    return relative_zlocs(zloc, _NEIGHBOR_OFFSETS)
+
+
+def relative_zlocs(zloc, offset_pairs):
+    """
+    Given a zloc and a sequence of 2-tuples of offset pairs (which should
+    contain only integer values), return zlocs with those offsets at the
+    precision level of `zloc`.
+    """
+    precision = zloc >> _PAIR_BITS
+    pair_bits = precision * 2
+    pair_bit_offset = _PAIR_BITS - pair_bits
+
+    z = (zloc & _PAIR_MASK) >> pair_bit_offset
+    header = precision << _PAIR_BITS
+    bit_mask = (1 << pair_bits) - 1
+
+    x, y = deinterleave(z)
+    neighbor_zlocs = []
+
+    for x_offset, y_offset in offset_pairs:
+        neighbor_z = interleave(
+            (x + x_offset) & bit_mask,
+            (y + y_offset) & bit_mask,
+        )
+        neighbor_zlocs.append((neighbor_z << pair_bit_offset) | header)
+
+    return tuple(neighbor_zlocs)
+
+
+def zloc_precision(zloc):
+    return zloc >> _PAIR_BITS
+
+
+def zloc_midpoint(zloc):
+    precision = zloc >> _PAIR_BITS
+    if precision >= MAX_PRECISION:
+        return zloc
+
+    new_header = MAX_PRECISION << _PAIR_BITS
+
+    sub_pair_offset = (precision - 1) * 2
+    sub_mask = 0x03 << sub_pair_offset
+
+    return (zloc & _PAIR_MASK) | new_header | sub_mask
+
+
+def zloc_at_precision(zloc, precision):
+    new_pair_bits = 2 * precision
+    mask = ((1 << new_pair_bits) - 1) << (_PAIR_BITS - new_pair_bits)
+    zloc &= mask
+    zloc |= precision << _PAIR_BITS
+    return zloc
+
+
+def ancestor(zloc, level=1):
+    new_precision = (zloc >> _PAIR_BITS) - level
+    return zloc_at_precision(zloc, new_precision)
+
+
+def lat_lng_to_zloc(lat, lng):
+    zlat = int((_LATITUDE_DEGREE_OFFSET + lat) / _DEGREES_PER_ZLOC_VALUE)
+    zlng = int((_LONGITUDE_DEGREE_OFFSET + lng) / _DEGREES_PER_ZLOC_VALUE)
+    zloc = interleave(zlat, zlng)
+    zloc |= MAX_PRECISION << _PAIR_BITS
+    return zloc
+
+
+def lat_lng_radians_to_zloc(lat, lng):
+    zlat = int((_LATITUDE_RADIAN_OFFSET + lat) / _RADIANS_PER_ZLOC_VALUE)
+    zlng = int((_LONGITUDE_RADIAN_OFFSET + lng) / _RADIANS_PER_ZLOC_VALUE)
+    zloc = interleave(zlat, zlng)
+    zloc |= MAX_PRECISION << _PAIR_BITS
+    return zloc
+
+
+def zloc_to_lat_lng(zloc):
+    zlat, zlng = deinterleave(zloc)
+    lat = zlat * _DEGREES_PER_ZLOC_VALUE - _LATITUDE_DEGREE_OFFSET
+    lng = zlng * _DEGREES_PER_ZLOC_VALUE - _LONGITUDE_DEGREE_OFFSET
+    return lat, lng
+
+
+def zloc_to_lat_lng_radians(zloc):
+    lat, lng = deinterleave(zloc)
+    lat = lat * _RADIANS_PER_ZLOC_VALUE - _LATITUDE_RADIAN_OFFSET
+    lng = lng * _RADIANS_PER_ZLOC_VALUE - _LONGITUDE_RADIAN_OFFSET
+    return lat, lng
+
+
+def zloc_to_lat_lng_with_range(zloc):
+    pass
+
+
+def zloc_to_lat_lng_radians_with_range(zloc):
+    pass
+
+
+def lat_lng_distance(lat1, lng1, lat2, lng2):
+
+    return lat_lng_radian_distance(
+        lat1=radians(lat1),
+        lng1=radians(lng1),
+        lat2=radians(lat2),
+        lng2=radians(lng2),
+    )
+
+
+def _haversine(theta):
+    return sin(theta / 2.)**2
+
+
+def lat_lng_radian_distance(lat1, lng1, lat2, lng2):
+    """
+    Calculate great circle distance using the haversine formula
+
+    See:
+        http://www.movable-type.co.uk/scripts/latlong.html
+        and
+        http://en.wikipedia.org/wiki/Haversine_formula
+    """
+
+    lat_diff = lat2 - lat1
+    lng_diff = lng2 - lng1
+
+    a = _haversine(lat_diff) + _haversine(lng_diff) * cos(lat1) * cos(lat2)
+    angular_distance = 2 * atan2(sqrt(a), sqrt(1 - a))
+    distance = EARTH_RADIUS_MEAN * angular_distance
+
+    return distance
+
+
+def zloc_distance(z1, z2):
+    lat1, lng1 = zloc_to_lat_lng_radians(z1)
+    lat2, lng2 = zloc_to_lat_lng_radians(z2)
+    return lat_lng_radian_distance(lat1, lng1, lat2, lng2)
+
+
+def zloc_range_meters(zloc):
+    """
+    Return a pair of (lat_range, top_lng_range, bottom_lng_range) in meters
+    """
+    topleft, topright, bottomleft, bottomright = zloc_corners(zloc)
+    return (
+        zloc_distance(topleft, bottomleft),
+        zloc_distance(topleft, topright),
+        zloc_distance(bottomleft, bottomright),
+    )
+
+
+def zloc_corners(zloc):
+    """
+    Return max-precision zlocs for the four corner points of a zloc.
+
+    Order is: top-left, top-right, bottom-right, bottom-left
+    """
+    precision = zloc >> _PAIR_BITS
+    range_ = 1 << (MAX_PRECISION - precision)
+    zloc_max_precision = zloc_at_precision(zloc, MAX_PRECISION)
+    return (zloc_max_precision,) + relative_zlocs(
+        zloc_max_precision,
+        (
+            (0, range_),
+            (range_, 0),
+            (range_, range_),
+        ),
+    )
+
+
+def zloc_blocks_for_radius(center_zloc, radius):
+    current_precision = zloc_precision(center_zloc)
+    lat_range, _, _ = zloc_range_meters(center_zloc)
+    num_lat_blocks = radius / lat_range
+    lat_precision = int(ceil(log(num_lat_blocks, 2)))
+
+    expanded_zloc = zloc_at_precision(center_zloc,
+                                      current_precision - lat_precision)
+
+    _, top_lng_range, bottom_lng_range = zloc_range_meters(expanded_zloc)
+    lng_range = (top_lng_range + bottom_lng_range) / 2
+    lng_blocks_needed = int(ceil((radius * 2 / lng_range) / 2)) * 2
+
+    lng_blocks_per_side = lng_blocks_needed / 2
+
+    offsets = product(
+        (1, 0),
+        xrange(-lng_blocks_per_side, lng_blocks_per_side),
+    )
+
+    return relative_zlocs(expanded_zloc, offsets)
+
+
 def test_symmetric_interleave(num_tests=10000):
     import random
-    max_half_int = (1 << _HALF_BITS) - 1
+    MAX_HALF_INT = (1 << MAX_PRECISION) - 1
 
     for _ in xrange(num_tests):
-        x = random.randint(0, max_half_int)
-        y = random.randint(0, max_half_int)
+        x = random.randint(0, MAX_HALF_INT)
+        y = random.randint(0, MAX_HALF_INT)
         assert (
             deinterleave(interleave(x, y)) == (x, y)
         ), 'Fail for x: {0}, y: {1}'.format(x, y)
 
 
-def _show_bits(n):
-    print bin((1 << 64) | n)[3:]
+def test_symmetric_lat_lng_conversion(num_tests=10000):
+    import random
+
+    max_error = 360. * _DEGREES_PER_ZLOC_VALUE
+
+    for _ in xrange(num_tests):
+        lat = -90. + random.random() * 180.
+        lng = -180. + random.random() * 360.
+        zloc = lat_lng_to_zloc(lat, lng)
+        lat2, lng2 = zloc_to_lat_lng(zloc)
+        lat_diff = abs(lat2 - lat)
+        lng_diff = abs(lng2 - lng)
+        assert (
+            lat_diff <= max_error and lng_diff <= max_error
+        ), 'Fail for lat: {0}, lng: {1}'.format(lat, lng)
 
 
-def neighbors(z):
-    pairs = (z >> _PAIR_BITS)
-    pair_bits = pairs * 2
-    pair_bit_offset = _PAIR_BITS - pair_bits
+def test_symmetric_lat_lng_radians_conversion(num_tests=10000):
+    import random
 
-    z = (z & _PAIR_MASK) >> pair_bit_offset
+    max_error = 2 * pi * _RADIANS_PER_ZLOC_VALUE
 
-    header = pairs << _PAIR_BITS
-
-    bit_mask = (1 << pair_bits) - 1
-
-    def adjacent(n):
-        return tuple((n + mod) & bit_mask for mod in (-1, 0, 1))
-
-    xs, ys = map(adjacent, deinterleave(z))
-    return tuple(
-        (interleave(x, y) << pair_bit_offset) | header
-        for x, y in product(xs, ys)
-    )
+    for _ in xrange(num_tests):
+        lat = -pi / 2 + random.random() * pi
+        lng = -pi + random.random() * 2 * pi
+        zloc = lat_lng_radians_to_zloc(lat, lng)
+        lat2, lng2 = zloc_to_lat_lng_radians(zloc)
+        lat_diff = abs(lat2 - lat)
+        lng_diff = abs(lng2 - lng)
+        assert (
+            lat_diff <= max_error and lng_diff <= max_error
+        ), 'Fail for lat: {0}, lng: {1}'.format(lat, lng)
 
 
-def ancestor(z, level=1):
-    new_pairs = (z >> _PAIR_BITS) - level
-    new_pair_bits = 2 * new_pairs
-    mask = ((1 << new_pair_bits) - 1) << (_PAIR_BITS - new_pair_bits)
-    z &= mask
-    z |= new_pairs << _PAIR_BITS
-    return z
+def _zloc_to_d3_point(zloc):
+    lat, lng = zloc_to_lat_lng(zloc)
+    return lng, lat
 
 
-def lat_lng_to_zloc(lat, lng):
-    lat = int((_LATITUDE_OFFSET + lat) * _ZLOC_MULTIPLIER)
-    lng = int((_LONGITUDE_OFFSET + lng) * _ZLOC_MULTIPLIER)
-    zloc = interleave(lat, lng)
-    zloc |= _HALF_BITS << _PAIR_BITS
-    return zloc
-
-
-def zloc_to_lat_lng(zloc):
-    lat, lng = deinterleave(zloc)
-    lat = float(lat) / _ZLOC_MULTIPLIER - _LATITUDE_OFFSET
-    lng = float(lng) / _ZLOC_MULTIPLIER - _LONGITUDE_OFFSET
-    return lat, lng
-
-
-def zloc_to_lat_lng_range(zloc):
-    pass
-
-
-# TODO: encode bit length in the first 6 bits of the int, leaving 58 for pairs
-#       this allows the bit string to also encode its scope and doesn't result
-#       in an important loss of precision at the scale we are talking
-# TODO: create functions for geographic distance from lat/lng
-# TODO: return a range from zloc_to_lat_lng? Due to the varying distance of
-#       lng, maybe this would be inaccurate. Probably not super necessary.
+def _color_mod(shape, fill=None, stroke=None):
+    if fill is not None:
+        shape['fill'] = fill
+    if stroke is not None:
+        shape['stroke'] = stroke
+    return shape
